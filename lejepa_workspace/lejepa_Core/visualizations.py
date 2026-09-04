@@ -15,88 +15,108 @@ from sklearn.metrics import confusion_matrix
 
 VALID_EXTS = (".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp")
 
-
 def plot_class_grid(
     dataset_dir: Union[str, Path],
     out_path: Union[str, Path],
+    samples_per_class: int = 4,
     image_size: Tuple[int, int] = (224, 224),
     title: str = "Dataset Class Overview",
     seed: int = 42
 ) -> None:
     """
-    Scans a directory containing class subfolders and generates a grid image displaying one sample per class.
+    Scans a directory containing class subfolders and generates a grid image.
+    Each class cell in the grid displays a grouped collage of multiple sample images.
 
     Parameters
     ----------
     dataset_dir : str or Path
-        Root directory path containing subfolders named after each class.
+        The root directory containing subfolders named after each class.
     out_path : str or Path
-        Destination file path where the generated grid image will be saved.
+        The destination file path where the generated grid image will be saved.
+    samples_per_class : int, default=4
+        The number of images to group together for each class (e.g., 4 creates a 2x2 group).
     image_size : tuple of int, default=(224, 224)
-        Target resolution (width, height) used to resize loaded sample images.
+        The overall target resolution of the grouped collage cell.
     title : str, default="Dataset Class Overview"
-        Global title displayed above the image grid.
+        The global title displayed above the overall grid.
     seed : int, default=42
-        Random seed for reproducible class image selection.
-
-    Returns
-    -------
-    None
-        Saves the resulting plot directly to `out_path` and closes the figure handle.
-
-    Raises
-    ------
-    FileNotFoundError
-        If `dataset_dir` does not exist or contains no class subdirectories with valid images.
+        The random seed used to ensure reproducible image selection.
     """
     dataset_path = Path(dataset_dir)
     if not dataset_path.exists():
-        raise FileNotFoundError(f"Dataset path '{dataset_dir}' does not exist.")
+        raise FileNotFoundError(f"The dataset path '{dataset_dir}' does not exist.")
 
+    # Prevent division by zero if the user inputs 0 or negative
+    samples_per_class = max(1, samples_per_class)
+    
     # Locate class directories containing valid images
     class_samples = []
     rng = random.Random(seed)
+    
+    # Ensure VALID_EXTS is defined, falling back if not in the global namespace
+    valid_exts = (".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp")
 
     for class_folder in sorted(dataset_path.iterdir()):
         if class_folder.is_dir():
             image_files = [
                 f for f in class_folder.iterdir()
-                if f.suffix.lower() in VALID_EXTS
+                if f.suffix.lower() in valid_exts
             ]
             if image_files:
-                selected_img = rng.choice(image_files)
-                class_samples.append((class_folder.name, selected_img))
+                # Grab up to `samples_per_class` images dynamically
+                n_samples = min(len(image_files), samples_per_class)
+                selected_imgs = rng.sample(image_files, n_samples)
+                class_samples.append((class_folder.name, selected_imgs))
 
     if not class_samples:
         raise FileNotFoundError(f"No subdirectories with valid image files were found in '{dataset_dir}'.")
 
+    # Calculate overall figure grid (how many class cells)
     n_classes = len(class_samples)
     ncols = math.ceil(math.sqrt(n_classes))
     nrows = math.ceil(n_classes / ncols)
 
     plt.rcParams.update({'font.family': 'sans-serif', 'axes.edgecolor': '#CCCCCC', 'axes.linewidth': 0.8})
-    fig, axes = plt.subplots(nrows, ncols, figsize=(ncols * 3, nrows * 3))
+    # Slightly increase default figsize multiplier so grouped details remain visible
+    fig, axes = plt.subplots(nrows, ncols, figsize=(ncols * 4, nrows * 4))
 
-    # Flatten axes array for uniform indexing
+    # Flatten the axes array for uniform indexing
     axes_flat = np.array(axes).flatten() if n_classes > 1 else [axes]
 
-    for rank, (class_name, img_path) in enumerate(class_samples):
-        ax = axes_flat[rank]
-        try:
-            with Image.open(img_path) as img:
-                img_resized = img.convert("RGB").resize(image_size, Image.Resampling.LANCZOS)
-                ax.imshow(img_resized)
-        except Exception as err:
-            ax.text(0.5, 0.5, f"Error loading\n{err}", ha="center", va="center", fontsize=8)
+    # Calculate sub-grid dimensions for the internal class collage
+    inner_cols = math.ceil(math.sqrt(samples_per_class))
+    inner_rows = math.ceil(samples_per_class / inner_cols)
+    single_w = image_size[0] // inner_cols
+    single_h = image_size[1] // inner_rows
 
-        ax.set_title(class_name, fontsize=10, fontweight="bold")
+    for rank, (class_name, img_paths) in enumerate(class_samples):
+        ax = axes_flat[rank]
+        
+        # Create a blank white canvas for the grouped image
+        collage = Image.new("RGB", (inner_cols * single_w, inner_rows * single_h), (255, 255, 255))
+        
+        # Stitch the sampled images into the collage
+        for idx, img_path in enumerate(img_paths):
+            try:
+                with Image.open(img_path) as img:
+                    img_resized = img.convert("RGB").resize((single_w, single_h), Image.Resampling.LANCZOS)
+                    
+                    # Map 1D index to 2D coordinates for pasting
+                    x_pos = (idx % inner_cols) * single_w
+                    y_pos = (idx // inner_cols) * single_h
+                    collage.paste(img_resized, (x_pos, y_pos))
+            except Exception as err:
+                print(f"Error loading {img_path}: {err}")
+
+        ax.imshow(collage)
+        ax.set_title(class_name, fontsize=12, fontweight="bold")
         ax.axis("off")
 
-    # Hide unpopulated grid slots
+    # Hide unpopulated grid slots in the overarching figure
     for rank in range(n_classes, len(axes_flat)):
         axes_flat[rank].axis("off")
 
-    plt.suptitle(title, fontsize=14, fontweight="bold", y=0.98)
+    plt.suptitle(title, fontsize=16, fontweight="bold", y=0.98)
     plt.tight_layout()
     plt.savefig(out_path, dpi=300, bbox_inches="tight")
     plt.close()
