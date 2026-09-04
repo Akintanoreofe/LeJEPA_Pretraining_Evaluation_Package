@@ -24,66 +24,70 @@ def plot_class_grid(
     seed: int = 42
 ) -> None:
     """
-    Scans a directory containing class subfolders and generates a grid image.
-    Each class cell in the grid displays a grouped collage of multiple sample images.
+    Scans a directory of class subfolders and generates a grid overview image
+    where each class cell displays a multi-image grouped collage.
 
     Parameters
     ----------
     dataset_dir : str or Path
-        The root directory containing subfolders named after each class.
+        Root directory containing subfolders named after each class.
     out_path : str or Path
-        The destination file path where the generated grid image will be saved.
+        Destination file path to save the generated grid overview image.
     samples_per_class : int, default=4
-        The number of images to group together for each class (e.g., 4 creates a 2x2 group).
+        Number of images to randomly sample and arrange into a collage per class.
     image_size : tuple of int, default=(224, 224)
-        The overall target resolution of the grouped collage cell.
+        Target resolution (width, height) for individual sample images.
     title : str, default="Dataset Class Overview"
-        The global title displayed above the overall grid.
+        Global title displayed above the entire image grid.
     seed : int, default=42
-        The random seed used to ensure reproducible image selection.
+        Random seed for reproducible image selection.
+
+    Returns
+    -------
+    None
+        Saves the resulting plot directly to `out_path` and closes the figure.
+
+    Raises
+    ------
+    FileNotFoundError
+        If `dataset_dir` does not exist or contains no valid class subfolders.
     """
     dataset_path = Path(dataset_dir)
     if not dataset_path.exists():
         raise FileNotFoundError(f"The dataset path '{dataset_dir}' does not exist.")
 
-    # Prevent division by zero if the user inputs 0 or negative
     samples_per_class = max(1, samples_per_class)
-    
-    # Locate class directories containing valid images
     class_samples = []
     rng = random.Random(seed)
-    
-    # Ensure VALID_EXTS is defined, falling back if not in the global namespace
     valid_exts = (".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp")
 
     for class_folder in sorted(dataset_path.iterdir()):
-        if class_folder.is_dir():
+        if class_folder.is_dir() and not class_folder.name.startswith('.'):
             image_files = [
                 f for f in class_folder.iterdir()
-                if f.suffix.lower() in valid_exts
+                if f.is_file() and f.suffix.lower() in valid_exts
             ]
             if image_files:
-                # Grab up to `samples_per_class` images dynamically
                 n_samples = min(len(image_files), samples_per_class)
                 selected_imgs = rng.sample(image_files, n_samples)
                 class_samples.append((class_folder.name, selected_imgs))
 
     if not class_samples:
-        raise FileNotFoundError(f"No subdirectories with valid image files were found in '{dataset_dir}'.")
+        raise FileNotFoundError(f"No valid image files found in '{dataset_dir}'.")
 
-    # Calculate overall figure grid (how many class cells)
     n_classes = len(class_samples)
     ncols = math.ceil(math.sqrt(n_classes))
     nrows = math.ceil(n_classes / ncols)
 
     plt.rcParams.update({'font.family': 'sans-serif', 'axes.edgecolor': '#CCCCCC', 'axes.linewidth': 0.8})
-    # Slightly increase default figsize multiplier so grouped details remain visible
     fig, axes = plt.subplots(nrows, ncols, figsize=(ncols * 4, nrows * 4))
+    
+    # Ensure axes is always a 1D iterable even if n_classes is small or layout is 1x1
+    if n_classes == 1:
+        axes_flat = [axes]
+    else:
+        axes_flat = np.array(axes).flatten()
 
-    # Flatten the axes array for uniform indexing
-    axes_flat = np.array(axes).flatten() if n_classes > 1 else [axes]
-
-    # Calculate sub-grid dimensions for the internal class collage
     inner_cols = math.ceil(math.sqrt(samples_per_class))
     inner_rows = math.ceil(samples_per_class / inner_cols)
     single_w = image_size[0] // inner_cols
@@ -91,17 +95,12 @@ def plot_class_grid(
 
     for rank, (class_name, img_paths) in enumerate(class_samples):
         ax = axes_flat[rank]
-        
-        # Create a blank white canvas for the grouped image
         collage = Image.new("RGB", (inner_cols * single_w, inner_rows * single_h), (255, 255, 255))
         
-        # Stitch the sampled images into the collage
         for idx, img_path in enumerate(img_paths):
             try:
                 with Image.open(img_path) as img:
                     img_resized = img.convert("RGB").resize((single_w, single_h), Image.Resampling.LANCZOS)
-                    
-                    # Map 1D index to 2D coordinates for pasting
                     x_pos = (idx % inner_cols) * single_w
                     y_pos = (idx // inner_cols) * single_h
                     collage.paste(img_resized, (x_pos, y_pos))
@@ -112,15 +111,15 @@ def plot_class_grid(
         ax.set_title(class_name, fontsize=12, fontweight="bold")
         ax.axis("off")
 
-    # Hide unpopulated grid slots in the overarching figure
+    # Hide unpopulated grid slots
     for rank in range(n_classes, len(axes_flat)):
         axes_flat[rank].axis("off")
 
     plt.suptitle(title, fontsize=16, fontweight="bold", y=0.98)
     plt.tight_layout()
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
     plt.savefig(out_path, dpi=300, bbox_inches="tight")
     plt.close()
-
 
 def plot_pca_2d(
     embeddings: np.ndarray,
