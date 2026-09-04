@@ -1,31 +1,136 @@
 
+
 import os
+import math
+import random
+from pathlib import Path
+from typing import Tuple, List, Union, Optional
+
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
+from PIL import Image
 from sklearn.decomposition import PCA
 from sklearn.metrics import confusion_matrix
-import pandas as pd
 
-def plot_pca_2d(embeddings, labels, class_names, out_path, title="PCA Embeddings"):
+VALID_EXTS = (".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp")
+
+
+def plot_class_grid(
+    dataset_dir: Union[str, Path],
+    out_path: Union[str, Path],
+    image_size: Tuple[int, int] = (224, 224),
+    title: str = "Dataset Class Overview",
+    seed: int = 42
+) -> None:
     """
-    Generates and saves a 2D PCA projection of the latent feature embeddings.
-
-    Automatically detects whether the labels are continuous (for regression) or
-    categorical (for classification) and adjusts the colormap and legend accordingly.
+    Scans a directory containing class subfolders and generates a grid image displaying one sample per class.
 
     Parameters
     ----------
-    embeddings : array-like of shape (n_samples, n_features)
-        The high-dimensional feature embeddings to be projected.
-    labels : array-like of shape (n_samples,)
-        The target values or class indices corresponding to each embedding.
-    class_names : list of str or dict
-        A mapping from class index to class name. Used for the legend when 
-        labels are categorical.
-    out_path : str or pathlib.Path
-        The destination file path where the generated plot will be saved.
-    title : str, optional
-        The title of the plot. Default is "PCA Embeddings".
+    dataset_dir : str or Path
+        Root directory path containing subfolders named after each class.
+    out_path : str or Path
+        Destination file path where the generated grid image will be saved.
+    image_size : tuple of int, default=(224, 224)
+        Target resolution (width, height) used to resize loaded sample images.
+    title : str, default="Dataset Class Overview"
+        Global title displayed above the image grid.
+    seed : int, default=42
+        Random seed for reproducible class image selection.
+
+    Returns
+    -------
+    None
+        Saves the resulting plot directly to `out_path` and closes the figure handle.
+
+    Raises
+    ------
+    FileNotFoundError
+        If `dataset_dir` does not exist or contains no class subdirectories with valid images.
+    """
+    dataset_path = Path(dataset_dir)
+    if not dataset_path.exists():
+        raise FileNotFoundError(f"Dataset path '{dataset_dir}' does not exist.")
+
+    # Locate class directories containing valid images
+    class_samples = []
+    rng = random.Random(seed)
+
+    for class_folder in sorted(dataset_path.iterdir()):
+        if class_folder.is_dir():
+            image_files = [
+                f for f in class_folder.iterdir()
+                if f.suffix.lower() in VALID_EXTS
+            ]
+            if image_files:
+                selected_img = rng.choice(image_files)
+                class_samples.append((class_folder.name, selected_img))
+
+    if not class_samples:
+        raise FileNotFoundError(f"No subdirectories with valid image files were found in '{dataset_dir}'.")
+
+    n_classes = len(class_samples)
+    ncols = math.ceil(math.sqrt(n_classes))
+    nrows = math.ceil(n_classes / ncols)
+
+    plt.rcParams.update({'font.family': 'sans-serif', 'axes.edgecolor': '#CCCCCC', 'axes.linewidth': 0.8})
+    fig, axes = plt.subplots(nrows, ncols, figsize=(ncols * 3, nrows * 3))
+
+    # Flatten axes array for uniform indexing
+    axes_flat = np.array(axes).flatten() if n_classes > 1 else [axes]
+
+    for rank, (class_name, img_path) in enumerate(class_samples):
+        ax = axes_flat[rank]
+        try:
+            with Image.open(img_path) as img:
+                img_resized = img.convert("RGB").resize(image_size, Image.Resampling.LANCZOS)
+                ax.imshow(img_resized)
+        except Exception as err:
+            ax.text(0.5, 0.5, f"Error loading\n{err}", ha="center", va="center", fontsize=8)
+
+        ax.set_title(class_name, fontsize=10, fontweight="bold")
+        ax.axis("off")
+
+    # Hide unpopulated grid slots
+    for rank in range(n_classes, len(axes_flat)):
+        axes_flat[rank].axis("off")
+
+    plt.suptitle(title, fontsize=14, fontweight="bold", y=0.98)
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=300, bbox_inches="tight")
+    plt.close()
+
+
+def plot_pca_2d(
+    embeddings: np.ndarray,
+    labels: np.ndarray,
+    class_names: List[str],
+    out_path: Union[str, Path],
+    title: str = "PCA Embeddings"
+) -> None:
+    """
+    Generates and saves a 2D PCA projection plot of feature embeddings[cite: 1].
+
+    Supports both categorical classification targets and continuous regression labels[cite: 1].
+
+    Parameters
+    ----------
+    embeddings : numpy.ndarray
+        High-dimensional feature embeddings of shape `(N, D)`.
+    labels : numpy.ndarray
+        Class index array or continuous values of shape `(N,)`.
+    class_names : list of str
+        Human-readable labels corresponding to categorical class indices[cite: 1].
+    out_path : str or Path
+        Destination path where the output image will be saved[cite: 1].
+    title : str, default="PCA Embeddings"
+        Title header for the projection plot[cite: 1].
+
+    Returns
+    -------
+    None
+        Saves the output figure to disk and closes the figure handle.
     """
     pca = PCA(n_components=2, random_state=42)
     Z = pca.fit_transform(embeddings)
@@ -33,97 +138,118 @@ def plot_pca_2d(embeddings, labels, class_names, out_path, title="PCA Embeddings
     plt.figure(figsize=(9, 7))
     cmap = plt.get_cmap("tab10")
 
-    # If labels are continuous (Regression), use a scatter colorbar
     if np.issubdtype(np.array(labels).dtype, np.floating):
         scatter = plt.scatter(Z[:, 0], Z[:, 1], c=labels, cmap="viridis", s=30, alpha=0.8)
         plt.colorbar(scatter, label="Target Value")
     else:
-        # Categorical labels (Classification)
         for c in sorted(np.unique(labels)):
             mask = np.array(labels) == c
             plt.scatter(Z[mask, 0], Z[mask, 1], label=class_names[c], color=cmap(c), s=35, alpha=0.8)
         plt.legend(fontsize=9, loc="best")
 
-    plt.xlabel(f"PC 1 ({pca.explained_variance_ratio_[0]*100:.1f}%)", fontsize=11)
-    plt.ylabel(f"PC 2 ({pca.explained_variance_ratio_[1]*100:.1f}%)", fontsize=11)
+    plt.xlabel(f"PC 1 ({pca.explained_variance_ratio_[0] * 100:.1f}%)", fontsize=11)
+    plt.ylabel(f"PC 2 ({pca.explained_variance_ratio_[1] * 100:.1f}%)", fontsize=11)
     plt.title(title, fontsize=13, fontweight="bold")
     plt.tight_layout()
     plt.savefig(out_path, dpi=300, bbox_inches="tight")
     plt.close()
 
 
-def plot_classification_confusion_matrix(y_true, y_pred, class_names, out_path, title="Confusion Matrix"):
+def plot_classification_confusion_matrix(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    class_names: List[str],
+    out_path: Union[str, Path],
+    title: str = "Confusion Matrix"
+) -> None:
     """
-    Renders and saves a normalized confusion matrix with percentage overlaps.
+    Renders and saves a normalized classification confusion matrix with percentage overlays[cite: 1].
 
     Parameters
     ----------
-    y_true : array-like of shape (n_samples,)
-        The ground truth (correct) target labels.
-    y_pred : array-like of shape (n_samples,)
-        The estimated targets as returned by a classifier.
+    y_true : numpy.ndarray
+        Ground-truth class targets of shape `(N,)`.
+    y_pred : numpy.ndarray
+        Model-predicted class targets of shape `(N,)`.
     class_names : list of str
-        An ordered list of class names corresponding to the label indices.
-    out_path : str or pathlib.Path
-        The destination file path where the generated plot will be saved.
-    title : str, optional
-        The title of the plot. Default is "Confusion Matrix".
+        List of class label strings[cite: 1].
+    out_path : str or Path
+        Destination path to write the output image[cite: 1].
+    title : str, default="Confusion Matrix"
+        Title header for the matrix plot[cite: 1].
+
+    Returns
+    -------
+    None
+        Saves the output figure directly to disk and closes the figure handle.
     """
     cm = confusion_matrix(y_true, y_pred, labels=list(range(len(class_names))))
     cm_norm = cm / np.maximum(cm.sum(axis=1, keepdims=True), 1)
-    
+
     plt.figure(figsize=(max(7, len(class_names) * 1.2), max(5, len(class_names) * 1.0)))
     plt.imshow(cm_norm, interpolation="nearest", cmap="Blues")
     plt.colorbar(label="Normalized Accuracy")
-    
+
     plt.xticks(np.arange(len(class_names)), class_names, rotation=45, ha="right")
     plt.yticks(np.arange(len(class_names)), class_names)
     plt.xlabel("Predicted Label", fontweight="bold")
     plt.ylabel("True Label", fontweight="bold")
     plt.title(title, fontweight="bold")
-    
+
     thresh = cm_norm.max() / 2.0 if cm_norm.size else 0.5
     for i in range(cm.shape[0]):
         for j in range(cm.shape[1]):
             txt = f"{cm[i, j]}\n({cm_norm[i, j] * 100:.1f}%)"
-            plt.text(j, i, txt, ha="center", va="center", 
-                     color="white" if cm_norm[i, j] > thresh else "black", fontsize=9)
-            
+            plt.text(
+                j, i, txt,
+                ha="center", va="center",
+                color="white" if cm_norm[i, j] > thresh else "black",
+                fontsize=9
+            )
+
     plt.tight_layout()
     plt.savefig(out_path, dpi=300, bbox_inches="tight")
     plt.close()
 
 
-def plot_regression_residuals(y_true, y_pred, out_path, title="Residual Plot"):
+def plot_regression_residuals(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    out_path: Union[str, Path],
+    title: str = "Residual Plot"
+) -> None:
     """
-    Plots true vs. predicted values alongside an ideal fit line for regression evaluation.
+    Plots true vs. predicted regression targets alongside an ideal identity line[cite: 1].
 
     Parameters
     ----------
-    y_true : array-like of shape (n_samples,)
-        The ground truth (correct) continuous target values.
-    y_pred : array-like of shape (n_samples,)
-        The estimated continuous target values returned by a regression model.
-    out_path : str or pathlib.Path
-        The destination file path where the generated plot will be saved.
-    title : str, optional
-        The title of the plot. Default is "Residual Plot".
+    y_true : numpy.ndarray
+        Ground-truth continuous target values[cite: 1].
+    y_pred : numpy.ndarray
+        Model-predicted continuous values[cite: 1].
+    out_path : str or Path
+        Output path where the residual plot will be saved[cite: 1].
+    title : str, default="Residual Plot"
+        Title header for the plot[cite: 1].
+
+    Returns
+    -------
+    None
+        Saves the output plot to disk and releases memory resources.
     """
     plt.figure(figsize=(8, 8))
-    
     plt.scatter(y_true, y_pred, alpha=0.6, color="teal", edgecolor="k")
-    
-    # Ideal line
+
     min_val = min(np.min(y_true), np.min(y_pred))
     max_val = max(np.max(y_true), np.max(y_pred))
-    plt.plot([min_val, max_val], [min_val, max_val], 'r--', lw=2, label="Ideal Fit")
-    
+    plt.plot([min_val, max_val], [min_val, max_val], "r--", lw=2, label="Ideal Fit")
+
     plt.xlabel("True Values", fontsize=11, fontweight="bold")
     plt.ylabel("Predicted Values", fontsize=11, fontweight="bold")
     plt.title(title, fontsize=13, fontweight="bold")
     plt.legend()
     plt.grid(True, linestyle="--", alpha=0.5)
-    
+
     plt.tight_layout()
     plt.savefig(out_path, dpi=300, bbox_inches="tight")
     plt.close()
