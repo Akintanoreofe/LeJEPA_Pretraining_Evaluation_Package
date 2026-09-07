@@ -13,9 +13,10 @@ from PIL import Image, ImageFile
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader, Subset, TensorDataset
-import torch_directml
 from torchvision import models
 from torchvision.transforms import v2
+
+from lejepa_Core.Backbone_pretrain import load_lejepa, select_device
 
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score, confusion_matrix
@@ -31,7 +32,7 @@ CKPT_EFFICIENTNET = "PATH_TO_LEJEPA_EFFNET_CKPT"
 CKPT_MOBILENET = "PATH_TO_LEJEPA_MOBILENET_CKPT"
 CKPT_CUSTOMCNN = "PATH_TO_LEJEPA_CUSTOMCNN_CKPT"
 
-DEVICE = torch_directml.device()
+DEVICE = select_device()
 IMAGE_SIZE = 224
 BATCH_SIZE = 16
 EPOCHS = 100
@@ -43,7 +44,13 @@ NUM_WORKERS = 0
 
 CLASSIFICATION_SHOTS = {"one_shot": 1, "ten_shot": 10, "full": None}
 VALID_EXTS = (".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp")
-ZOOM_CLASSES = ["alfalfa", "haylage", "tmr"]
+# Optional center-crop "zoom" applied before the standard transforms.
+# NOTE: applying a zoom only to *some* classes (the previous default was
+# ["alfalfa", "haylage", "tmr"]) leaks the label into the input: the probe can
+# learn "zoomed-in texture => these classes" as a shortcut and report inflated
+# accuracy. Leave ZOOM_CLASSES empty (no zoom) or set ZOOM_CLASSES = None to
+# apply the same zoom to every class.
+ZOOM_CLASSES = []
 CHOSEN_ZOOM = 0.15
 
 def set_seed(seed: int):
@@ -151,8 +158,10 @@ class ZoomPreprocessingDataset(Dataset):
         The underlying dataset providing samples and classes.
     tf : callable
         The torchvision transform pipeline to apply after the zoom operation.
-    zoom_classes : list of str
-        A list of class names that should have the zoom applied.
+    zoom_classes : list of str or None
+        Class-name substrings that should have the zoom applied. An empty list
+        disables the zoom; ``None`` applies it to every class. Zooming only a
+        subset of classes leaks the label into the input (see ``ZOOM_CLASSES``).
     zoom_factor : float
         The fraction of the image dimensions to keep during the crop.
 
@@ -200,7 +209,8 @@ class ZoomPreprocessingDataset(Dataset):
         path, label_idx = self.base_dataset.samples[i]
         class_name = self.base_dataset.classes[label_idx].lower()
         img = safe_open(path)
-        if any(target in class_name for target in self.zoom_classes):
+        apply_zoom = self.zoom_classes is None or any(target in class_name for target in self.zoom_classes)
+        if apply_zoom and self.zoom_factor < 1.0:
             w, h = img.size
             left, top = w * (0.5 - self.zoom_factor / 2), h * (0.5 - self.zoom_factor / 2)
             right, bottom = w * (0.5 + self.zoom_factor / 2), h * (0.5 + self.zoom_factor / 2)
@@ -372,61 +382,6 @@ class MobileNetBackbone(nn.Module):
         """
         return self.pool(self.features(x)).flatten(1)
 
-def load_lejepa(backbone, ckpt_path, is_custom=False):
-    """
-    Load custom LeJEPA pretrained weights into the given backbone model.
-
-    Handles structural mismatches and prefixes that commonly arise when loading 
-    custom pretraining state dictionaries into standard torchvision architectures.
-
-    Parameters
-    ----------
-    backbone : torch.nn.Module
-        The neural network backbone to populate with weights.
-    ckpt_path : str
-        The file path to the saved PyTorch checkpoint.
-    is_custom : bool, optional
-        A flag indicating whether the backbone is the custom CNN (default is False).
-
-    Returns
-    -------
-    torch.nn.Module
-        The backbone loaded with the remapped LeJEPA weights. If the checkpoint 
-        is not found, the original randomly initialized backbone is returned.
-    """
-    if not os.path.exists(ckpt_path):
-        print(f"[WARNING] Checkpoint not found: {ckpt_path}. Returning randomly initialized backbone.")
-        return backbone
-
-    sd = torch.load(ckpt_path, map_location="cpu", weights_only=False)
-    if isinstance(sd, dict):
-        for wrapper in ("state_dict", "model_state_dict", "model", "backbone_state_dict"):
-            if wrapper in sd and isinstance(sd[wrapper], dict):
-                sd = sd[wrapper]
-                break
-
-    target_keys = set(backbone.state_dict().keys())
-    remapped = {}
-    
-    for k, v in sd.items():
-        k_clean = k.replace("backbone.", "").replace("encoder.", "").replace("features.", "")
-        
-        if is_custom:
-            if k_clean in target_keys:
-                remapped[k_clean] = v
-            elif f"features.{k_clean}" in target_keys:
-                remapped[f"features.{k_clean}"] = v
-        else:
-            if k_clean in target_keys:
-                remapped[k_clean] = v
-            elif f"features.{k_clean}" in target_keys:
-                remapped[f"features.{k_clean}"] = v
-            else:
-                remapped[k_clean] = v
-
-    backbone.load_state_dict(remapped, strict=False)
-    return backbone
-
 
 def make_80_20_splits(dataset):
     """
@@ -561,7 +516,7 @@ def run_classification():
         "lejepa_resnet18": load_lejepa(ResNet18Backbone(), CKPT_RESNET),
         "lejepa_efficientnetb0": load_lejepa(EfficientNetBackbone(), CKPT_EFFICIENTNET),
         "lejepa_mobilenetv2": load_lejepa(MobileNetBackbone(), CKPT_MOBILENET),
-        "lejepa_customcnn": load_lejepa(CustomCNNBackbone(), CKPT_CUSTOMCNN, is_custom=True),
+        "lejepa_customcnn": load_lejepa(CustomCNNBackbone(), CKPT_CUSTOMCNN),
     }
 
     results = []

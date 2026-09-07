@@ -13,6 +13,28 @@ from torchvision.ops import MLP
 from torchvision.transforms import v2
 
 
+def select_device():
+    """
+    Pick the best available torch device.
+
+    Returns
+    -------
+    str or torch.device
+        A DirectML device if ``torch_directml`` is installed (Windows), else
+        ``"cuda"`` if available, else ``"mps"`` on Apple Silicon, else ``"cpu"``.
+    """
+    try:
+        import torch_directml  # noqa: F401  (optional, Windows only)
+        return torch_directml.device()
+    except ImportError:
+        pass
+    if torch.cuda.is_available():
+        return "cuda"
+    if getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available():
+        return "mps"
+    return "cpu"
+
+
 def tile_image(img: Image.Image):
     """
     Split an image into four equal non-overlapping tiles (quadrants).
@@ -467,7 +489,7 @@ def start_pretraining(
         raise ValueError(f"Invalid model_name '{model_name}'. Choose from: {list(BACKBONE_REGISTRY.keys())}")
     
     # 2. Setup Device
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = select_device()
     print(f"Initializing pretraining for '{model_name}' on device '{device}'...")
 
     # 3. Setup Dataset and DataLoader
@@ -487,43 +509,156 @@ def start_pretraining(
     run_pretraining_loop(model, loader, epochs, lr, device, lambda_reg, save_path)
 
 
-def load_lejepa(backbone, ckpt_path):
-    """
-    Safely load pretrained LeJEPA weights into a given backbone model.
+# Mapping from the attribute names used by ``ResNet18Encoder`` (and the raw
+# torchvision ResNet) to the positional indices used when the same layers are
+# wrapped in an ``nn.Sequential`` (as the ``*Backbone`` classes in the
+# evaluation modules do).
+_RESNET_SEQUENTIAL_INDEX = {
+    "conv1": "0",
+    "bn1": "1",
+    "layer1": "4",
+    "layer2": "5",
+    "layer3": "6",
+    "layer4": "7",
+}
 
-    This function mitigates structure and mapping issues (such as double-prefixes 
-    or unmapped keys) when loading custom state dictionaries into standard 
-    architectures for downstream evaluation.
+_STATE_DICT_WRAPPERS = ("state_dict", "model_state_dict", "model", "backbone_state_dict")
+
+
+def _unwrap_state_dict(obj):
+    """Return the raw parameter dict from a checkpoint that may wrap it."""
+    if isinstance(obj, dict):
+        for wrapper in _STATE_DICT_WRAPPERS:
+            if wrapper in obj and isinstance(obj[wrapper], dict):
+                return obj[wrapper]
+    return obj
+
+
+def _candidate_keys(key):
+    """
+    Generate the target-module key names a checkpoint key could correspond to.
+
+    Checkpoints written by :func:`run_pretraining_loop` use either bare
+    attribute names (``ResNet18Encoder``: ``conv1.weight``, ``layer1.0...``,
+    ``proj.0.weight``) or a ``backbone.`` prefix (the other encoders:
+    ``backbone.0.0.weight``). Downstream feature extractors wrap the same
+    layers under ``features.`` and, for ResNet18, as a positional
+    ``nn.Sequential``. This yields every plausible spelling so the caller can
+    pick whichever exists in the target module.
+    """
+    stripped = key
+    for prefix in ("backbone.", "encoder.", "features."):
+        if stripped.startswith(prefix):
+            stripped = stripped[len(prefix):]
+            break
+
+    candidates = [key, stripped, f"backbone.{stripped}", f"features.{stripped}"]
+
+    head, sep, rest = stripped.partition(".")
+    if sep and head in _RESNET_SEQUENTIAL_INDEX:
+        idx = _RESNET_SEQUENTIAL_INDEX[head]
+        candidates.append(f"features.{idx}.{rest}")
+        candidates.append(f"backbone.{idx}.{rest}")
+
+    seen, ordered = set(), []
+    for c in candidates:
+        if c not in seen:
+            seen.add(c)
+            ordered.append(c)
+    return ordered
+
+
+def remap_lejepa_state_dict(sd, target_keys):
+    """
+    Rename checkpoint keys so they line up with ``target_keys``.
+
+    Parameters
+    ----------
+    sd : dict
+        A (possibly wrapped) state dict produced by LeJEPA pretraining.
+    target_keys : iterable of str
+        The keys of the module the weights will be loaded into.
+
+    Returns
+    -------
+    tuple of (dict, list of str)
+        The remapped state dict restricted to keys present in the target, and
+        the list of checkpoint keys that could not be matched (typically the
+        projection head when loading into a feature extractor).
+    """
+    sd = _unwrap_state_dict(sd)
+    target_keys = set(target_keys)
+    remapped, unmatched = {}, []
+    for k, v in sd.items():
+        for cand in _candidate_keys(k):
+            if cand in target_keys:
+                remapped[cand] = v
+                break
+        else:
+            unmatched.append(k)
+    return remapped, unmatched
+
+
+def load_lejepa(backbone, ckpt_path, strict=True):
+    """
+    Load pretrained LeJEPA weights into a backbone, verifying they actually land.
+
+    Works for the encoders defined in this module (``ResNet18Encoder``,
+    ``EfficientNetB0Encoder``, ``MobileNetV2Encoder``, ``ConvNetEncoder``) as
+    well as the ``*Backbone`` feature extractors in the evaluation modules,
+    which wrap the same layers under ``features.``. Checkpoint keys are
+    remapped with :func:`remap_lejepa_state_dict`.
 
     Parameters
     ----------
     backbone : torch.nn.Module
         The target model architecture to populate with loaded weights.
     ckpt_path : str
-        The file path to the saved `.pth` checkpoint.
+        The file path to the saved ``.pth`` checkpoint.
+    strict : bool, optional
+        If True (default), raise if any parameter of ``backbone`` is left
+        uninitialised by the checkpoint. Keys present in the checkpoint but
+        absent from ``backbone`` (e.g. the projection head when loading into a
+        feature extractor) are always ignored.
 
     Returns
     -------
     torch.nn.Module
         The backbone model populated with the matching checkpoint weights.
+
+    Raises
+    ------
+    FileNotFoundError
+        If ``ckpt_path`` does not exist.
+    RuntimeError
+        If no checkpoint tensor could be matched to the backbone, or if
+        ``strict`` is True and some backbone parameters were not covered.
     """
+    if not os.path.exists(ckpt_path):
+        raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
+
     try:
         sd = torch.load(ckpt_path, map_location="cpu", weights_only=True)
     except Exception:
         sd = torch.load(ckpt_path, map_location="cpu", weights_only=False)
-        
-    remapped = {}
-    for k, v in sd.items():
-        if not k.startswith("backbone."):
-            continue
-        k_clean = k.replace("backbone.", "")
-        
-        if not isinstance(backbone, ResNet18Encoder) and k_clean.startswith("features."):
-            k_clean = k_clean.replace("features.", "", 1)
-            remapped[f"features.{k_clean}"] = v
-        else:
-            remapped[k_clean] = v
-            
+
+    remapped, unmatched = remap_lejepa_state_dict(sd, backbone.state_dict().keys())
+    if not remapped:
+        raise RuntimeError(
+            f"No tensor in {ckpt_path} matches {type(backbone).__name__}; "
+            f"checkpoint keys look like {list(_unwrap_state_dict(sd))[:3]}"
+        )
+
     missing, unexpected = backbone.load_state_dict(remapped, strict=False)
-    logging.info(f"Loaded {ckpt_path} | Missing: {len(missing)} | Unexpected: {len(unexpected)}")
+    logging.info(
+        f"Loaded {ckpt_path} into {type(backbone).__name__} | "
+        f"matched: {len(remapped)} | missing: {len(missing)} | ignored from ckpt: {len(unmatched)}"
+    )
+    if unexpected:  # cannot happen since we only pass target keys, but be explicit
+        raise RuntimeError(f"Unexpected keys after remapping: {unexpected[:5]}")
+    if missing and strict:
+        raise RuntimeError(
+            f"{len(missing)} parameters of {type(backbone).__name__} were not found in "
+            f"{ckpt_path} (e.g. {missing[:3]}). Pass strict=False to allow a partial load."
+        )
     return backbone
