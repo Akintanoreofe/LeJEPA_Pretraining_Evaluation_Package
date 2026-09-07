@@ -12,9 +12,10 @@ from PIL import Image, ImageFile
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader, Subset, TensorDataset
-import torch_directml
 from torchvision import models
 from torchvision.transforms import v2
+
+from lejepa_Core.Backbone_pretrain import load_lejepa, select_device
 
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import r2_score, mean_absolute_error, mean_squared_error
@@ -33,7 +34,7 @@ CKPT_EFFICIENTNET = "PATH_TO_LEJEPA_EFFNET_CKPT"
 CKPT_MOBILENET = "PATH_TO_LEJEPA_MOBILENET_CKPT"
 CKPT_CUSTOMCNN = "PATH_TO_LEJEPA_CUSTOMCNN_CKPT"
 
-DEVICE = torch_directml.device()
+DEVICE = select_device()
 IMAGE_SIZE = 224
 BATCH_SIZE = 16
 EPOCHS = 100
@@ -285,38 +286,6 @@ class MobileNetBackbone(nn.Module):
         """
         return self.pool(self.features(x)).flatten(1)
 
-def load_lejepa(backbone, ckpt_path):
-    """
-    Load custom LeJEPA pretrained weights into the given backbone model.
-
-    Handles structural mismatches and prefixes that commonly arise when loading 
-    custom pretraining state dictionaries into standard torchvision architectures.
-
-    Parameters
-    ----------
-    backbone : torch.nn.Module
-        The neural network backbone to populate with weights.
-    ckpt_path : str
-        The file path to the saved PyTorch checkpoint.
-
-    Returns
-    -------
-    torch.nn.Module
-        The backbone loaded with the remapped LeJEPA weights. If the checkpoint 
-        is not found, the original backbone is returned unchanged.
-    """
-    if not os.path.exists(ckpt_path): return backbone
-    sd = torch.load(ckpt_path, map_location="cpu", weights_only=False)
-    if isinstance(sd, dict) and "state_dict" in sd: sd = sd["state_dict"]
-    
-    target_keys = set(backbone.state_dict().keys())
-    remapped = {}
-    for k, v in sd.items():
-        k_clean = k.replace("backbone.", "").replace("features.", "")
-        if k_clean in target_keys: remapped[k_clean] = v
-        elif f"features.{k_clean}" in target_keys: remapped[f"features.{k_clean}"] = v
-    backbone.load_state_dict(remapped, strict=False)
-    return backbone
 
 # ==============================================================================
 # EXECUTION

@@ -11,5 +11,13 @@ dependencies = [
     "numpy",
     "pandas",
     "scikit-learn",
-    "matplotlib"
+    "matplotlib",
+    "Pillow",
+    "tqdm",
+    "openpyxl"
 ]
+
+[project.optional-dependencies]
+heic = ["pillow-heif"]
+directml = ["torch-directml"]
+test = ["pytest"]

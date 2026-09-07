@@ -28,10 +28,9 @@ VALID_EXTS = (".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp")
 try:
     from pillow_heif import register_heif_opener
     register_heif_opener()
-except ImportError:
-    raise ImportError(
-        "HEIC support requires 'pillow-heif'. Install it with: pip install pillow-heif"
-    )
+    HEIF_SUPPORTED = True
+except ImportError:  # pillow-heif is optional; only needed for .heic/.heif files
+    HEIF_SUPPORTED = False
 
 
 def plot_class_grid(
@@ -127,7 +126,10 @@ def plot_class_grid(
                     y_pos = (idx // inner_cols) * single_h
                     collage.paste(img_resized, (x_pos, y_pos))
             except Exception as err:
-                print(f"Error loading {img_path}: {err}")
+                hint = ""
+                if img_path.suffix.lower() in (".heic", ".heif") and not HEIF_SUPPORTED:
+                    hint = " (install 'pillow-heif' for HEIC/HEIF support)"
+                print(f"Error loading {img_path}: {err}{hint}")
 
         ax.imshow(collage)
         ax.set_title(class_name, fontsize=12, fontweight="bold")
